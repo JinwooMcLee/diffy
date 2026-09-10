@@ -1,4 +1,4 @@
-import { IconConvo, IconSidebarLeft, IconSidebarLeftOpen, IconX } from '@pierre/icons';
+import { IconConvo, IconRefresh, IconSidebarLeft, IconSidebarLeftOpen, IconX } from '@pierre/icons';
 import { memo, useCallback } from 'react';
 
 import { Badge } from '@/components/ui/badge';
@@ -162,6 +162,20 @@ export const DiffOverlayHeader = memo(function DiffOverlayHeader({
           ) : null}
 
           <AppearanceSettingsMenu />
+
+          {onRefresh ? (
+            <Button
+              type='button'
+              variant='ghost'
+              size='icon-sm'
+              onClick={onRefresh}
+              disabled={isRefreshing}
+              aria-label='Refresh pull request'
+              title={isRefreshing ? 'Refreshing…' : 'Refresh pull request (⇧R)'}
+            >
+              <IconRefresh className={cn(isRefreshing && 'animate-spin')} />
+            </Button>
+          ) : null}
 
           <HeaderOverflowMenu
             displayPrefs={displayPrefs}

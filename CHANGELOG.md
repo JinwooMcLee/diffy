@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- Auto-refresh: probe the PR head when the tab regains focus (and every minute while visible) and reload when new commits or activity land; deferred while a comment is being written
+- Add `Shift+R` shortcut and a header button to refresh the pull request; refresh now keeps the scroll position
+- Show Viewed checkboxes in the file tree, including folder-level checkboxes that mark every file underneath
+- Auto-collapse a tree folder once every file in it is viewed (and expand it again when one becomes unviewed)
+
+### Fixes
+
+- Fix clicking the already-selected file in the tree not scrolling to it
+- Reliably collapse viewed files in the diff, including after a refresh and when the viewed state loads late
+- Keep file tree badges (comments, viewed) in sync after the tree is first rendered
+
 ## v1.4.1
 
 ### Fixes

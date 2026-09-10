@@ -38,7 +38,7 @@ export function buildCommentBadgeCountCss(
     .map(([count, formattedCount]) => {
       const titleSuffix = escapeCssString(reviewCommentDecorationTitleSuffix(count));
       const escapedCount = escapeCssString(formattedCount);
-      return `[data-item-section="decoration"] > span[title$="${titleSuffix}"]::after { content: "${escapedCount}"; }`;
+      return `[data-item-section="decoration"] > span[title*="${titleSuffix} "]::after, [data-item-section="decoration"] > span[title$="${titleSuffix}"]::after { content: "${escapedCount}"; }`;
     })
     .join('\n');
 }

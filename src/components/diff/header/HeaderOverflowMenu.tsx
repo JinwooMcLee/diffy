@@ -92,6 +92,7 @@ export function HeaderOverflowMenu({
                         />
                       }
                       label={isRefreshing ? 'Refreshing…' : 'Refresh pull request'}
+                      value='⇧R'
                       disabled={isRefreshing}
                       onClick={() => runAction(() => onRefresh?.())}
                     />

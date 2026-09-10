@@ -14,11 +14,19 @@ export type UseViewedFilesResult = {
   progress: { viewed: number; total: number };
   isViewed: (path: string) => boolean;
   toggleViewed: (path: string, next?: boolean) => void;
+  /** Mark several files at once (folder checkbox). One optimistic update, sequential mutations. */
+  setViewedMany: (paths: readonly string[], shouldView: boolean) => void;
   nextUnviewedPath: (fromPath: string | null) => string | null;
 };
 
 type ToggleViewedVariables = {
   path: string;
+  shouldView: boolean;
+  pullRequestId: string;
+};
+
+type SetViewedManyVariables = {
+  paths: readonly string[];
   shouldView: boolean;
   pullRequestId: string;
 };
@@ -77,6 +85,55 @@ export function useViewedFiles(
     },
   });
 
+  const setManyMutation = useMutation({
+    mutationFn: async ({ paths, shouldView, pullRequestId }: SetViewedManyVariables) => {
+      // GitHub asks clients not to fire mutations concurrently; walk the folder serially.
+      let firstError: unknown = null;
+      for (const path of paths) {
+        try {
+          if (shouldView) {
+            await markFileAsViewed(pullRequestId, path);
+          } else {
+            await unmarkFileAsViewed(pullRequestId, path);
+          }
+        } catch (failure: unknown) {
+          firstError ??= failure;
+        }
+      }
+
+      if (firstError != null) {
+        throw firstError;
+      }
+    },
+    onMutate: async ({ paths, shouldView }) => {
+      await queryClient.cancelQueries({ queryKey });
+
+      const previous = queryClient.getQueryData<ViewedFilesQueryData>(queryKey);
+      if (previous == null || !previous.hasToken) {
+        return { previous };
+      }
+
+      const nextState: FileViewedState = shouldView ? 'VIEWED' : 'UNVIEWED';
+      const nextViewedByPath = { ...previous.viewedByPath };
+      for (const path of paths) {
+        nextViewedByPath[path] = nextState;
+      }
+
+      const optimistic: Extract<ViewedFilesQueryData, { hasToken: true }> = {
+        hasToken: true,
+        pullRequestId: previous.pullRequestId,
+        viewedByPath: nextViewedByPath,
+      };
+      queryClient.setQueryData<ViewedFilesQueryData>(queryKey, optimistic);
+
+      return { previous };
+    },
+    onError: () => {
+      // Some files may have succeeded before the failure; resync from GitHub instead of blindly reverting.
+      void queryClient.invalidateQueries({ queryKey });
+    },
+  });
+
   const viewedByPath = useMemo(() => toViewedMap(data), [data]);
   const hasToken = data?.hasToken === true;
   const isReady = !isPending;
@@ -102,6 +159,27 @@ export function useViewedFiles(
     [data, toggleMutation, viewedByPath],
   );
 
+  const setViewedMany = useCallback(
+    (paths: readonly string[], shouldView: boolean) => {
+      if (data == null || !data.hasToken) {
+        return;
+      }
+
+      const targetState: FileViewedState = shouldView ? 'VIEWED' : 'UNVIEWED';
+      const pending = paths.filter((path) => viewedByPath.get(path) !== targetState);
+      if (pending.length === 0) {
+        return;
+      }
+
+      setManyMutation.mutate({
+        paths: pending,
+        shouldView,
+        pullRequestId: data.pullRequestId,
+      });
+    },
+    [data, setManyMutation, viewedByPath],
+  );
+
   const progress = useMemo(
     () => computeViewedProgress(orderedPaths, viewedByPath),
     [orderedPaths, viewedByPath],
@@ -112,7 +190,7 @@ export function useViewedFiles(
     [orderedPaths, viewedByPath],
   );
 
-  const mutationError = toggleMutation.error;
+  const mutationError = toggleMutation.error ?? setManyMutation.error;
 
   return {
     viewedByPath,
@@ -131,6 +209,7 @@ export function useViewedFiles(
     progress,
     isViewed,
     toggleViewed,
+    setViewedMany,
     nextUnviewedPath,
   };
 }

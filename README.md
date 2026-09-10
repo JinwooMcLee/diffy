@@ -36,7 +36,8 @@ Powered by Pierre [Trees](https://trees.software) and [Diffs](https://diffs.com)
 - **Full-screen diffs** : Scroll the entire PR in without any slowdown.
 - **Searchable file tree** : Jump to any file instantly, even in huge PRs.
 - **Inline comments & batch reviews** : Comment on lines, queue threads, and publish from the review dock
-- **Viewed-file tracking** : Mark what you've read and jump to the next unviewed file
+- **Viewed-file tracking** : Mark what you've read (per file or per folder, right in the file tree) and jump to the next unviewed file
+- **Always current** : Refreshes itself when the PR gets new commits or comments; `Shift+R` refreshes on demand
 - **Split or unified layout** : Choose between a split view or a unified view.
 
 Many more: Themes, Customizable fonts, Image diffs, customizable , open in separate tab, and more.

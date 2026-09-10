@@ -22,9 +22,11 @@ import {
   FILE_TREE_COMMENT_ICON_MASK_URL,
   FILE_TREE_COMMENT_ICON_SIZE,
 } from '@/lib/file-tree/comment-icon';
-import { createFileTreeInput } from '@/lib/file-tree/input';
+import { createFileTreeInput, normalizeTreeDirectoryPath } from '@/lib/file-tree/input';
+import { FILE_TREE_VIEWED_MARK_CSS, isTreeViewedMarkElement } from '@/lib/file-tree/viewed-mark';
 import type { GitHubPullRequest, GitHubPullRequestFile } from '@/lib/github/api';
-import type { ViewedProgress } from '@/lib/review/viewed-files';
+import type { FileViewedState } from '@/lib/github/graphql';
+import { isViewedComplete, type ViewedProgress } from '@/lib/review/viewed-files';
 
 import { ReviewProgress } from '../review/ReviewProgress';
 import { SidebarPrInfo } from './SidebarPrInfo';
@@ -48,6 +50,11 @@ type FileTreePanelProps = {
   reviewCommentCount: number;
   reviewProgress?: ViewedProgress | null;
   onJumpToNextUnviewed?: () => void;
+  /** `null` hides the viewed checkboxes (no token). */
+  viewedByPath?: ReadonlyMap<string, FileViewedState> | null;
+  isViewedReady?: boolean;
+  onToggleViewed?: (path: string, next: boolean) => void;
+  onToggleViewedMany?: (paths: readonly string[], next: boolean) => void;
 };
 
 const FILE_TREE_COMMENT_BADGE_CSS = `
@@ -96,6 +103,8 @@ const FILE_TREE_PANEL_BASE_CSS = `
   }
 
   ${FILE_TREE_COMMENT_BADGE_CSS}
+
+  ${FILE_TREE_VIEWED_MARK_CSS}
 `;
 
 type FileTreeSearchHeaderProps = {
@@ -177,6 +186,26 @@ function FileTreeSearchHeader({
   );
 }
 
+/** Walk the (shadow-piercing) event path up to the tree row button. */
+function findTreeRowFromEvent(event: Event): { path: string; isFile: boolean } | null {
+  for (const node of event.composedPath()) {
+    if (!(node instanceof HTMLElement)) {
+      continue;
+    }
+
+    const path = node.dataset.itemPath;
+    if (path != null) {
+      return { path, isFile: node.dataset.itemType === 'file' };
+    }
+  }
+
+  return null;
+}
+
+function isViewedMarkTarget(event: Event): boolean {
+  return event.composedPath().some((node) => isTreeViewedMarkElement(node));
+}
+
 export function FileTreePanel({
   files,
   selectedPath,
@@ -186,11 +215,15 @@ export function FileTreePanel({
   reviewCommentCount,
   reviewProgress,
   onJumpToNextUnviewed,
+  viewedByPath = null,
+  isViewedReady = false,
+  onToggleViewed,
+  onToggleViewedMany,
 }: FileTreePanelProps) {
   const treeThemeStyles = useTreeThemeStyles();
   const treeInput = useMemo(
-    () => createFileTreeInput(files, reviewCommentCountByPath),
-    [files, reviewCommentCountByPath],
+    () => createFileTreeInput(files, reviewCommentCountByPath, viewedByPath),
+    [files, reviewCommentCountByPath, viewedByPath],
   );
   const fileTreePanelCss = useMemo(
     () => `${FILE_TREE_PANEL_BASE_CSS}\n${buildCommentBadgeCountCss(reviewCommentCountByPath)}`,
@@ -198,9 +231,10 @@ export function FileTreePanel({
   );
   const pathsSignatureRef = useRef(treeInput.pathsSignature);
   const selectedPathRef = useRef(selectedPath);
-  const annotationsByPathRef = useRef(treeInput.annotationsByPath);
+  const treeInputRef = useRef(treeInput);
   const [searchQuery, setSearchQuery] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const treeHostRef = useRef<HTMLDivElement>(null);
   const isProgrammaticSelectionRef = useRef(false);
   const handleSelectionChange = useCallback(
     (selectedPaths: readonly string[]) => {
@@ -226,12 +260,16 @@ export function FileTreePanel({
     }
   }, []);
 
-  const renderRowDecoration = useCallback<FileTreeRowDecorationRenderer>(
-    ({ item }) => {
-      return treeInput.annotationsByPath.get(item.path) ?? null;
-    },
-    [treeInput.annotationsByPath],
-  );
+  // Pierre captures `renderRowDecoration` when the model is created, so it must
+  // read the latest input through a ref rather than closing over props.
+  const renderRowDecoration = useCallback<FileTreeRowDecorationRenderer>(({ item }) => {
+    const input = treeInputRef.current;
+    if (item.kind === 'directory') {
+      return input.directoryAnnotationsByPath.get(normalizeTreeDirectoryPath(item.path)) ?? null;
+    }
+
+    return input.annotationsByPath.get(item.path) ?? null;
+  }, []);
 
   const { model } = useFileTree({
     preparedInput: treeInput.preparedInput,
@@ -255,7 +293,7 @@ export function FileTreePanel({
   const syncExternalSelection = useCallback(() => {
     const currentModel = modelRef.current;
     const path = selectedPathRef.current;
-    const annotationsByPath = annotationsByPathRef.current;
+    const annotationsByPath = treeInputRef.current.annotationsByPath;
 
     isProgrammaticSelectionRef.current = true;
     try {
@@ -291,9 +329,8 @@ export function FileTreePanel({
 
   useEffect(() => {
     selectedPathRef.current = selectedPath;
-    annotationsByPathRef.current = treeInput.annotationsByPath;
     syncExternalSelection();
-  }, [selectedPath, treeInput.annotationsByPath, syncExternalSelection]);
+  }, [selectedPath, syncExternalSelection]);
 
   useEffect(() => {
     if (searchQuery) {
@@ -311,13 +348,25 @@ export function FileTreePanel({
     });
   }, [model, searchQuery]);
 
+  // Auto-collapse directories once every file inside is viewed; applied only on
+  // transitions so manual expand/collapse is respected.
+  const appliedFullyViewedDirectoriesRef = useRef<Set<string> | null>(null);
+
   useEffect(() => {
+    const isSameInput = treeInputRef.current === treeInput;
+    treeInputRef.current = treeInput;
+
     if (pathsSignatureRef.current === treeInput.pathsSignature) {
       model.setGitStatus(treeInput.gitStatus);
+      if (!isSameInput) {
+        // Decorations (comment badges, viewed marks) changed: force a row re-render.
+        model.setComposition(model.getComposition());
+      }
       return;
     }
 
     pathsSignatureRef.current = treeInput.pathsSignature;
+    appliedFullyViewedDirectoriesRef.current = null;
     model.resetPaths(treeInput.paths, { preparedInput: treeInput.preparedInput });
     model.setGitStatus(treeInput.gitStatus);
     setSearchQuery('');
@@ -325,10 +374,164 @@ export function FileTreePanel({
   }, [model, treeInput, syncExternalSelection]);
 
   useEffect(() => {
+    if (!viewedByPath || !isViewedReady || searchQuery) {
+      return;
+    }
+
+    const fullyViewed = new Set<string>();
+    for (const [directoryPath, directoryFiles] of treeInput.filePathsByDirectory) {
+      if (
+        directoryFiles.length > 0 &&
+        directoryFiles.every((path) => isViewedComplete(viewedByPath.get(path)))
+      ) {
+        fullyViewed.add(directoryPath);
+      }
+    }
+
+    const previous = appliedFullyViewedDirectoriesRef.current;
+    for (const directoryPath of fullyViewed) {
+      if (previous?.has(directoryPath)) {
+        continue;
+      }
+
+      const item = model.getItem(directoryPath);
+      if (item && 'collapse' in item) {
+        item.collapse();
+      }
+    }
+
+    if (previous) {
+      for (const directoryPath of previous) {
+        if (fullyViewed.has(directoryPath)) {
+          continue;
+        }
+
+        const item = model.getItem(directoryPath);
+        if (item && 'expand' in item) {
+          item.expand();
+        }
+      }
+    }
+
+    appliedFullyViewedDirectoriesRef.current = fullyViewed;
+  }, [model, treeInput.filePathsByDirectory, viewedByPath, isViewedReady, searchQuery]);
+
+  useEffect(() => {
     modelRef.current = model;
     syncExternalSelection();
     return model.subscribe(syncExternalSelection);
   }, [model, syncExternalSelection]);
+
+  // Row clicks are handled by Pierre inside the shadow root. We listen in the
+  // capture phase on the host so we can (a) intercept viewed-checkbox clicks
+  // before they select the row and (b) re-scroll to a file that is already
+  // selected, since Pierre only reports selection *changes*.
+  const latestHandlersRef = useRef({
+    onSelectPath,
+    onToggleViewed,
+    onToggleViewedMany,
+    viewedByPath,
+    isViewedReady,
+  });
+  useEffect(() => {
+    latestHandlersRef.current = {
+      onSelectPath,
+      onToggleViewed,
+      onToggleViewedMany,
+      viewedByPath,
+      isViewedReady,
+    };
+  });
+
+  useEffect(() => {
+    const host = treeHostRef.current;
+    if (!host) {
+      return;
+    }
+
+    const toggleViewedForRow = (row: { path: string; isFile: boolean }) => {
+      const {
+        onToggleViewed: toggleViewed,
+        onToggleViewedMany: toggleViewedMany,
+        viewedByPath: currentViewedByPath,
+        isViewedReady: ready,
+      } = latestHandlersRef.current;
+      if (!currentViewedByPath || !ready) {
+        return;
+      }
+
+      if (row.isFile) {
+        toggleViewed?.(row.path, !isViewedComplete(currentViewedByPath.get(row.path)));
+        return;
+      }
+
+      const directoryFiles =
+        treeInputRef.current.filePathsByDirectory.get(normalizeTreeDirectoryPath(row.path)) ?? [];
+      if (directoryFiles.length === 0) {
+        return;
+      }
+
+      const allViewed = directoryFiles.every((path) =>
+        isViewedComplete(currentViewedByPath.get(path)),
+      );
+      toggleViewedMany?.(directoryFiles, !allViewed);
+    };
+
+    const handleClick = (event: MouseEvent) => {
+      const row = findTreeRowFromEvent(event);
+      if (!row) {
+        return;
+      }
+
+      if (isViewedMarkTarget(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.button === 0) {
+          toggleViewedForRow(row);
+        }
+        return;
+      }
+
+      if (
+        !row.isFile ||
+        event.button !== 0 ||
+        event.shiftKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.altKey
+      ) {
+        return;
+      }
+
+      if (row.path === selectedPathRef.current) {
+        latestHandlersRef.current.onSelectPath(row.path);
+      }
+    };
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (
+        event.key !== 'Enter' ||
+        event.shiftKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.altKey
+      ) {
+        return;
+      }
+
+      const row = findTreeRowFromEvent(event);
+      if (row?.isFile && row.path === selectedPathRef.current) {
+        latestHandlersRef.current.onSelectPath(row.path);
+      }
+    };
+
+    host.addEventListener('click', handleClick, { capture: true });
+    host.addEventListener('keydown', handleKeyDown, { capture: true });
+    return () => {
+      host.removeEventListener('click', handleClick, { capture: true });
+      host.removeEventListener('keydown', handleKeyDown, { capture: true });
+    };
+  }, []);
 
   return (
     <div
@@ -356,11 +559,16 @@ export function FileTreePanel({
         searchQuery={searchQuery}
         onSearchQueryChange={handleSearchQueryChange}
       />
-      <FileTree
-        className='min-h-0 flex-1'
-        model={model}
-        style={{ height: '100%', colorScheme: treeThemeStyles.colorScheme }}
-      />
+      <div
+        ref={treeHostRef}
+        className='flex min-h-0 flex-1 flex-col'
+      >
+        <FileTree
+          className='min-h-0 flex-1'
+          model={model}
+          style={{ height: '100%', colorScheme: treeThemeStyles.colorScheme }}
+        />
+      </div>
       <SidebarPrInfo pullRequest={pullRequest} />
     </div>
   );

@@ -26,6 +26,7 @@ import { NotificationErrorBar } from '@/components/diff/NotificationErrorBar';
 import { ThemedCodeView } from '@/components/diff/ThemedCodeView';
 import { IconChevronDown } from '@/components/icons/Chevron';
 import { IconSpinner } from '@/components/icons/Spinner';
+import { useAutoRefreshPullRequest } from '@/hooks/useAutoRefreshPullRequest';
 import { useCodeViewItems } from '@/hooks/useCodeViewItems';
 import {
   kickCodeViewLayout,
@@ -73,6 +74,7 @@ import {
   type ReviewThreadMetadata,
 } from '@/lib/review/comments';
 import { bindReplySession } from '@/lib/review/reply-session';
+import { isViewedComplete } from '@/lib/review/viewed-files';
 import { buildAnnotationThemeStyle } from '@/lib/theming/buildAnnotationThemeStyle';
 import { diffyChromeMapping } from '@/lib/theming/diffyChromeMapping';
 import { cn } from '@/lib/utils';
@@ -359,9 +361,141 @@ export function DiffOverlay({
     onClose,
   });
 
+  // Refresh remounts CodeView (see `refreshGeneration`), which resets scroll. Capture
+  // the position first and restore it once the new instance is mounted.
+  const pendingScrollRestoreRef = useRef<number | null>(null);
+  const startRefresh = useCallback(() => {
+    const instance = viewerRef.current?.getInstance() as
+      | { getContainerElement?: () => HTMLElement | null }
+      | undefined;
+    pendingScrollRestoreRef.current = instance?.getContainerElement?.()?.scrollTop ?? null;
+    onRefresh();
+  }, [onRefresh]);
+
   const handleRefresh = useCallback(() => {
-    withQueueConfirm(onRefresh);
-  }, [onRefresh, withQueueConfirm]);
+    if (isRefreshing) {
+      return;
+    }
+
+    withQueueConfirm(startRefresh);
+  }, [isRefreshing, startRefresh, withQueueConfirm]);
+
+  useEffect(() => {
+    if (!isCodeViewMounted || refreshGeneration === 0) {
+      return;
+    }
+
+    const position = pendingScrollRestoreRef.current;
+    if (position == null) {
+      return;
+    }
+
+    pendingScrollRestoreRef.current = null;
+    let attempts = 0;
+    let rafId = 0;
+    const restore = () => {
+      const viewer = viewerRef.current;
+      const instance = viewer?.getInstance() as
+        | { getContainerElement?: () => HTMLElement | null }
+        | undefined;
+      const scrollRoot = instance?.getContainerElement?.();
+      if (viewer && scrollRoot && scrollRoot.scrollHeight >= position + scrollRoot.clientHeight) {
+        viewer.scrollTo({ type: 'position', position, behavior: 'instant' });
+        return;
+      }
+
+      // Virtualized content grows as items lay out; give it a few frames to catch up.
+      attempts += 1;
+      if (attempts < 30) {
+        rafId = requestAnimationFrame(restore);
+      } else if (viewer) {
+        viewer.scrollTo({ type: 'position', position, behavior: 'instant' });
+      }
+    };
+    rafId = requestAnimationFrame(restore);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+    };
+  }, [isCodeViewMounted, refreshGeneration]);
+
+  // Shift+R refreshes the pull request (skipped while typing in a field).
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        !event.shiftKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.altKey ||
+        event.key.toLowerCase() !== 'r' ||
+        event.repeat
+      ) {
+        return;
+      }
+
+      const active = document.activeElement;
+      if (
+        active instanceof HTMLElement &&
+        (active instanceof HTMLInputElement ||
+          active instanceof HTMLTextAreaElement ||
+          active instanceof HTMLSelectElement ||
+          active.isContentEditable)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      handleRefresh();
+    };
+
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    return () => window.removeEventListener('keydown', handleKeyDown, { capture: true });
+  }, [handleRefresh]);
+
+  const canAutoRefresh = useCallback((): boolean => {
+    if (isRefreshing || isBatchMode || queue.length > 0 || isReviewDockExpanded) {
+      return false;
+    }
+
+    if (lightboxImagePath != null) {
+      return false;
+    }
+
+    const viewer = viewerRef.current;
+    if (viewer && codeViewItems && hasAnyDraftAnnotation(viewer, codeViewItems.items)) {
+      return false;
+    }
+
+    const active = document.activeElement;
+    if (
+      active instanceof HTMLElement &&
+      (active instanceof HTMLInputElement ||
+        active instanceof HTMLTextAreaElement ||
+        active.isContentEditable)
+    ) {
+      return false;
+    }
+
+    return true;
+  }, [
+    codeViewItems,
+    isBatchMode,
+    isRefreshing,
+    isReviewDockExpanded,
+    lightboxImagePath,
+    queue.length,
+  ]);
+
+  useAutoRefreshPullRequest({
+    ref: data.ref,
+    headSha: data.pullRequest.head.sha,
+    updatedAt: data.pullRequest.updated_at,
+    isRefreshing,
+    rateLimit,
+    canRefresh: canAutoRefresh,
+    onRefresh: startRefresh,
+  });
 
   const reviewQueueContextValue = useMemo<ReviewQueueContextValue>(
     () => ({
@@ -634,38 +768,95 @@ export function DiffOverlay({
     [codeViewItems, computeAllCollapsed, setItemCollapsed, setAllCollapsed, viewedFiles],
   );
 
-  const didInitialViewedCollapseRef = useRef(false);
+  const handleToggleViewedMany = useCallback(
+    (paths: readonly string[], next: boolean) => {
+      viewedFiles.setViewedMany(paths, next);
+
+      if (codeViewItems) {
+        for (const path of paths) {
+          const file = codeViewItems.fileByPath.get(path);
+          if (file) {
+            setItemCollapsed(getCodeViewItemIdForFile(file, codeViewItems.diffPathSet), next);
+          }
+        }
+      }
+
+      setAllCollapsed(computeAllCollapsed());
+    },
+    [codeViewItems, computeAllCollapsed, setItemCollapsed, setAllCollapsed, viewedFiles],
+  );
+
+  // Viewed files start collapsed in the diff. Applied per CodeView instance so a
+  // refresh (remount) or late-arriving viewed state still collapses them; files the
+  // user expands by hand stay expanded because each path is only applied once.
+  const appliedViewedCollapseRef = useRef<{ key: unknown; paths: Set<string> } | null>(null);
   useEffect(() => {
-    if (
-      didInitialViewedCollapseRef.current ||
-      !isCodeViewMounted ||
-      !codeViewItems ||
-      !viewedFiles.isReady
-    ) {
+    if (!isCodeViewMounted || !codeViewItems || !viewedFiles.isReady) {
       return;
     }
 
-    didInitialViewedCollapseRef.current = true;
-    for (const [path, state] of viewedFiles.viewedByPath) {
-      if (state !== 'VIEWED') {
-        continue;
-      }
-      const file = codeViewItems.fileByPath.get(path);
-      if (file) {
-        setItemCollapsed(getCodeViewItemIdForFile(file, codeViewItems.diffPathSet), true);
-      }
+    const instanceKey = `${refreshGeneration}`;
+    let applied = appliedViewedCollapseRef.current;
+    if (applied == null || applied.key !== instanceKey) {
+      applied = { key: instanceKey, paths: new Set() };
+      appliedViewedCollapseRef.current = applied;
     }
 
-    setAllCollapsed(computeAllCollapsed());
+    let didCollapse = false;
+    for (const [path, state] of viewedFiles.viewedByPath) {
+      if (!isViewedComplete(state) || applied.paths.has(path)) {
+        continue;
+      }
+
+      const file = codeViewItems.fileByPath.get(path);
+      if (!file) {
+        continue;
+      }
+
+      applied.paths.add(path);
+      setItemCollapsed(getCodeViewItemIdForFile(file, codeViewItems.diffPathSet), true);
+      didCollapse = true;
+    }
+
+    if (!didCollapse) {
+      return;
+    }
+
+    // CodeView applies updateItem asynchronously; sync the header toggle on the next frame.
+    const rafId = requestAnimationFrame(() => {
+      setAllCollapsed(computeAllCollapsed());
+    });
+    return () => cancelAnimationFrame(rafId);
   }, [
     isCodeViewMounted,
     codeViewItems,
+    refreshGeneration,
     viewedFiles.isReady,
     viewedFiles.viewedByPath,
     setItemCollapsed,
     computeAllCollapsed,
     setAllCollapsed,
   ]);
+
+  // Seed the (uncontrolled) CodeView with viewed files already collapsed when the
+  // viewed state is known at mount time, so they never flash open.
+  const initialCodeViewItems = useMemo(() => {
+    if (!codeViewItems) {
+      return undefined;
+    }
+
+    if (!viewedFiles.isReady || viewedFiles.viewedByPath.size === 0) {
+      return codeViewItems.items;
+    }
+
+    return codeViewItems.items.map((item) => {
+      if (item.collapsed || !isViewedComplete(viewedFiles.viewedByPath.get(getItemPath(item)))) {
+        return item;
+      }
+
+      return { ...item, collapsed: true };
+    });
+  }, [codeViewItems, viewedFiles.isReady, viewedFiles.viewedByPath]);
 
   const handleJumpToNextUnviewed = useCallback(() => {
     const next = viewedFiles.nextUnviewedPath(selectedPath);
@@ -1049,6 +1240,10 @@ export function DiffOverlay({
                           reviewCommentCount={data.reviewComments.length}
                           reviewProgress={viewedFiles.hasToken ? viewedFiles.progress : null}
                           onJumpToNextUnviewed={handleJumpToNextUnviewed}
+                          viewedByPath={viewedFiles.hasToken ? viewedFiles.viewedByPath : null}
+                          isViewedReady={viewedFiles.isReady}
+                          onToggleViewed={handleToggleViewed}
+                          onToggleViewedMany={handleToggleViewedMany}
                         />
                       ) : (
                         <div className='flex h-full items-center justify-center p-6 text-center text-muted-foreground'>
@@ -1086,7 +1281,7 @@ export function DiffOverlay({
                             key={`codeview-${refreshGeneration}`}
                             ref={viewerRef}
                             containerRef={handleCodeViewContainer}
-                            initialItems={codeViewItems.items}
+                            initialItems={initialCodeViewItems ?? codeViewItems.items}
                             className='gprv-code-view'
                             style={codeViewStyle}
                             renderAnnotation={renderReviewAnnotation}

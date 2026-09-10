@@ -171,6 +171,8 @@ export function getPullRequestContentCacheKey(ref: GitHubPullRequestRef, headSha
 export type PullRequestHeadMeta = {
   sha: string;
   title: string;
+  /** ISO timestamp; bumps on commits, comments, reviews, and metadata edits. */
+  updatedAt: string;
 };
 
 export async function fetchPullRequestHeadMeta(
@@ -178,7 +180,7 @@ export async function fetchPullRequestHeadMeta(
 ): Promise<PullRequestHeadMeta> {
   const octokit = await getOctokit();
   const { data } = await octokit.rest.pulls.get(pullParams(ref));
-  return { sha: data.head.sha, title: data.title };
+  return { sha: data.head.sha, title: data.title, updatedAt: data.updated_at };
 }
 
 export async function fetchPullRequestDiffData(

@@ -2,7 +2,7 @@ import { IconCiWarning } from '@pierre/icons';
 import { memo, useMemo } from 'react';
 
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import type { RateLimitState } from '@/lib/github/api';
+import { isRateLimitLow, type RateLimitState } from '@/lib/github/api';
 import { cn } from '@/lib/utils';
 
 type HeaderStatusStripProps = {
@@ -35,14 +35,21 @@ export const HeaderStatusStrip = memo(function HeaderStatusStrip({
       });
     }
 
-    if (rateLimit != null && rateLimit.remaining >= 0 && rateLimit.remaining <= 10) {
+    if (rateLimit != null && rateLimit.remaining >= 0 && isRateLimitLow(rateLimit)) {
       const exhausted = rateLimit.remaining <= 0;
+      const resetsAt = new Date(rateLimit.reset * 1000).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      const isAuthenticated = rateLimit.limit > 60;
       next.push({
         id: 'rate-limit',
-        label: exhausted ? 'API limit exhausted' : `${rateLimit.remaining} API requests remaining`,
+        label: exhausted
+          ? `API limit exhausted · resets ${resetsAt}`
+          : `${rateLimit.remaining} API requests left · resets ${resetsAt}`,
         title: exhausted
-          ? 'API rate limit exhausted. Add a token in the diffy popup.'
-          : `${rateLimit.remaining} requests remaining — add a token to avoid hitting the limit.`,
+          ? `GitHub API rate limit (${rateLimit.limit}/h) exhausted for this account across all apps. Resets at ${resetsAt}.`
+          : `${rateLimit.remaining} of ${rateLimit.limit} hourly requests left. Auto-refresh and image prefetch are paused until ${resetsAt}.${isAuthenticated ? '' : ' Add a token in the diffy popup for 5000/h.'}`,
         tone: exhausted ? 'danger' : 'warning',
       });
     }

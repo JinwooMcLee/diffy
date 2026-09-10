@@ -4,6 +4,7 @@ import type {
   GitHubPullRequestFile,
   GitHubPullRequestRef,
 } from '@/lib/github/api';
+import { getRateLimitState, isRateLimitLow } from '@/lib/github/api';
 import { fetchRepoFileBytes, MediaFileFetchError } from '@/lib/github/blobs';
 
 export type ImageDiffSideSource = {
@@ -241,6 +242,11 @@ export function prefetchImageDiffs(
   pullRequest: GitHubPullRequest,
   files: readonly GitHubPullRequestFile[],
 ): void {
+  // Background prefetch is optional; keep the budget for what the user opens.
+  if (isRateLimitLow(getRateLimitState())) {
+    return;
+  }
+
   for (const file of files) {
     if (classifyChangedFile(file) !== 'image') {
       continue;

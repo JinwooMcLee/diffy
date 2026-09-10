@@ -3,6 +3,7 @@ import { Octokit } from '@octokit/rest';
 import { githubFetch } from './github-fetch';
 
 type RateLimitHeaders = {
+  limit: number;
   remaining: number;
   reset: number;
 };
@@ -23,12 +24,17 @@ function notifyRateLimit(state: RateLimitHeaders): void {
 function readRateLimitHeaders(headers: Record<string, string>): RateLimitHeaders | null {
   const remaining = headers['x-ratelimit-remaining'];
   const reset = headers['x-ratelimit-reset'];
+  const limit = headers['x-ratelimit-limit'];
   if (remaining === undefined || reset === undefined) {
     return null;
   }
 
+  const parsedRemaining = Number.parseInt(remaining, 10);
+  const parsedLimit = limit === undefined ? Number.NaN : Number.parseInt(limit, 10);
   return {
-    remaining: Number.parseInt(remaining, 10),
+    // Unauthenticated REST is 60/h, authenticated 5000/h; fall back on that split if the header is missing.
+    limit: Number.isFinite(parsedLimit) ? parsedLimit : parsedRemaining > 60 ? 5000 : 60,
+    remaining: parsedRemaining,
     reset: Number.parseInt(reset, 10),
   };
 }

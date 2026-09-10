@@ -40,9 +40,22 @@ export type PullRequestDiffData = {
 };
 
 export type RateLimitState = {
+  limit: number;
   remaining: number;
   reset: number;
 };
+
+/** Keep this share of the hourly budget in reserve for user-initiated work. */
+const RATE_LIMIT_RESERVE_RATIO = 0.1;
+
+/** True when background work (auto-refresh, prefetch) should pause to protect the remaining budget. */
+export function isRateLimitLow(state: RateLimitState | null | undefined): boolean {
+  if (state == null) {
+    return false;
+  }
+
+  return state.remaining <= Math.max(10, Math.floor(state.limit * RATE_LIMIT_RESERVE_RATIO));
+}
 
 export type LoadProgress = {
   phase: 'metadata' | 'files' | 'comments' | 'diff' | 'building';

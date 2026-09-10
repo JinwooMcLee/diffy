@@ -4,7 +4,9 @@
 
 ### Features
 
-- Auto-refresh: probe the PR head when the tab regains focus (and every minute while visible) and reload when new commits or activity land; deferred while a comment is being written
+- Auto-refresh: probe the PR head when the tab regains focus (and every 2 minutes while visible); new commits reload the PR, comment activity syncs just the review comments in place; deferred while a comment is being written; can be turned off in the header menu
+- Refreshes and probes revalidate through the browser HTTP cache (`If-None-Match`), so unchanged GitHub responses return 304 and do not count against the API rate limit
+- Pause auto-refresh and image prefetch when less than 10% of the hourly API budget remains, and show the reset time in the status strip
 - Add `Shift+R` shortcut and a header button to refresh the pull request; refresh now keeps the scroll position
 - Show Viewed checkboxes in the file tree, including folder-level checkboxes that mark every file underneath
 - Auto-collapse a tree folder once every file in it is viewed (and expand it again when one becomes unviewed)

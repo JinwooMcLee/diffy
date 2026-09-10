@@ -34,6 +34,8 @@ export type CodeViewDisplayPrefs = {
   codeFontFeatures: CodeFontFeaturesPreference;
   imageCompareMode: ImageCompareMode;
   imageCheckerboard: boolean;
+  /** Probe GitHub for new commits/activity while the overlay is visible. */
+  autoRefresh: boolean;
 };
 
 export const DISPLAY_PREFS_STORAGE_KEY = 'codeViewDisplayPrefs';
@@ -50,6 +52,7 @@ export const DEFAULT_CODE_VIEW_DISPLAY_PREFS: CodeViewDisplayPrefs = {
   codeFontFeatures: DEFAULT_CODE_FONT_FEATURES,
   imageCompareMode: '2up',
   imageCheckerboard: true,
+  autoRefresh: true,
 };
 
 const DIFF_INDICATORS: readonly DiffIndicators[] = ['classic', 'bars', 'none'];
@@ -112,6 +115,10 @@ function normalizeDisplayPrefs(value: unknown): CodeViewDisplayPrefs {
       typeof candidate.imageCheckerboard === 'boolean'
         ? candidate.imageCheckerboard
         : DEFAULT_CODE_VIEW_DISPLAY_PREFS.imageCheckerboard,
+    autoRefresh:
+      typeof candidate.autoRefresh === 'boolean'
+        ? candidate.autoRefresh
+        : DEFAULT_CODE_VIEW_DISPLAY_PREFS.autoRefresh,
   };
 }
 

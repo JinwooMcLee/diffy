@@ -2,20 +2,21 @@ import { useEffect, useRef } from 'react';
 
 import {
   fetchPullRequestHeadMeta,
+  isRateLimitLow,
   type GitHubPullRequestRef,
+  type PullRequestHeadMeta,
   type RateLimitState,
 } from '@/lib/github/api';
 import { withRevalidateHttpCache } from '@/lib/github/github-fetch';
 
-/** Poll cadence while the overlay is visible. Probes revalidate via ETag, so unchanged PRs cost no rate limit. */
-const POLL_INTERVAL_MS = 60_000;
+/** Poll cadence while the overlay is visible. Probes revalidate via ETag, so an unchanged PR answers 304 and costs no rate limit. */
+const POLL_INTERVAL_MS = 120_000;
 /** Focus/visibility events can fire in bursts; never probe more often than this. */
 const MIN_PROBE_GAP_MS = 15_000;
-/** Leave headroom for the actual refresh (and the user's other tabs) when the REST budget is nearly gone. */
-const MIN_RATE_LIMIT_REMAINING = 25;
 
 type UseAutoRefreshPullRequestParams = {
   ref: GitHubPullRequestRef;
+  enabled: boolean;
   /** Head SHA and `updated_at` of the data currently on screen. */
   headSha: string;
   updatedAt: string;
@@ -23,44 +24,78 @@ type UseAutoRefreshPullRequestParams = {
   rateLimit: RateLimitState | null;
   /** Return false to defer a detected change (e.g. the user is mid-comment). It is retried on the next probe. */
   canRefresh: () => boolean;
+  /** New commits: reload the whole PR. */
   onRefresh: () => void;
+  /** Activity without new commits (comments, edits): sync just the review comments. */
+  onActivity: (head: PullRequestHeadMeta) => void;
 };
 
+type PendingChange = { kind: 'commits' } | { kind: 'activity'; head: PullRequestHeadMeta };
+
 /**
- * Event-driven refresh: probes the PR head (one cheap `pulls.get`) when the tab
- * regains focus/visibility and on a slow interval, and refreshes the overlay
- * when GitHub reports new commits or activity.
+ * Event-driven refresh: probes the PR head (one cheap, conditional `pulls.get`)
+ * when the tab regains focus/visibility and on a slow interval, then reloads
+ * only what changed. Hidden tabs never probe; a low rate-limit budget pauses it.
  */
 export function useAutoRefreshPullRequest({
   ref,
+  enabled,
   headSha,
   updatedAt,
   isRefreshing,
   rateLimit,
   canRefresh,
   onRefresh,
+  onActivity,
 }: UseAutoRefreshPullRequestParams): void {
-  const latest = useRef({ headSha, updatedAt, isRefreshing, rateLimit, canRefresh, onRefresh });
+  const latest = useRef({
+    headSha,
+    updatedAt,
+    isRefreshing,
+    rateLimit,
+    canRefresh,
+    onRefresh,
+    onActivity,
+  });
   useEffect(() => {
-    latest.current = { headSha, updatedAt, isRefreshing, rateLimit, canRefresh, onRefresh };
+    latest.current = {
+      headSha,
+      updatedAt,
+      isRefreshing,
+      rateLimit,
+      canRefresh,
+      onRefresh,
+      onActivity,
+    };
   });
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+
     let isCancelled = false;
     let isProbing = false;
     let lastProbeAt = 0;
-    let hasPendingChange = false;
+    let pendingChange: PendingChange | null = null;
 
-    const tryRefresh = (): boolean => {
-      const { canRefresh: canRefreshNow, onRefresh: refresh } = latest.current;
+    const applyChange = (change: PendingChange): void => {
+      const {
+        canRefresh: canRefreshNow,
+        onRefresh: refresh,
+        onActivity: activity,
+      } = latest.current;
       if (!canRefreshNow()) {
-        hasPendingChange = true;
-        return false;
+        pendingChange = change;
+        return;
       }
 
-      hasPendingChange = false;
-      refresh();
-      return true;
+      pendingChange = null;
+      if (change.kind === 'commits') {
+        refresh();
+      } else {
+        activity(change.head);
+      }
     };
 
     const probe = async () => {
@@ -68,9 +103,9 @@ export function useAutoRefreshPullRequest({
         return;
       }
 
-      if (hasPendingChange) {
-        // A change was already detected but deferred; don't spend a request re-detecting it.
-        tryRefresh();
+      if (pendingChange) {
+        // Already detected but deferred; don't spend a request re-detecting it.
+        applyChange(pendingChange);
         return;
       }
 
@@ -79,8 +114,7 @@ export function useAutoRefreshPullRequest({
         return;
       }
 
-      const { rateLimit: currentRateLimit } = latest.current;
-      if (currentRateLimit != null && currentRateLimit.remaining < MIN_RATE_LIMIT_REMAINING) {
+      if (isRateLimitLow(latest.current.rateLimit)) {
         return;
       }
 
@@ -93,8 +127,10 @@ export function useAutoRefreshPullRequest({
         }
 
         const { headSha: currentSha, updatedAt: currentUpdatedAt } = latest.current;
-        if (head.sha !== currentSha || head.updatedAt !== currentUpdatedAt) {
-          tryRefresh();
+        if (head.sha !== currentSha) {
+          applyChange({ kind: 'commits' });
+        } else if (head.updatedAt !== currentUpdatedAt) {
+          applyChange({ kind: 'activity', head });
         }
       } catch {
         // Probes are best-effort; the manual refresh path surfaces real errors.
@@ -124,5 +160,5 @@ export function useAutoRefreshPullRequest({
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleFocus);
     };
-  }, [ref]);
+  }, [enabled, ref]);
 }

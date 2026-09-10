@@ -8,7 +8,8 @@ import type { CodeViewDisplayPrefs } from '@/lib/diff/display-prefs';
 import { cn } from '@/lib/utils';
 
 import { DisplaySettingsPanel } from './DisplaySettingsPanel';
-import { OverflowMenuItem, OverflowMenuSection } from './overflowMenuUi';
+import { OverflowMenuItem, OverflowMenuSection, OverflowMenuSettingsRow } from './overflowMenuUi';
+import { SettingsSwitch } from './SettingsSwitch';
 
 type HeaderOverflowMenuProps = {
   displayPrefs: CodeViewDisplayPrefs;
@@ -103,6 +104,15 @@ export function HeaderOverflowMenu({
                       label='Open in new tab'
                       onClick={() => runAction(onOpenInNewTab)}
                     />
+                  ) : null}
+                  {canRefresh ? (
+                    <OverflowMenuSettingsRow label='Auto-refresh'>
+                      <SettingsSwitch
+                        checked={displayPrefs.autoRefresh}
+                        onChange={(checked) => onDisplayPrefsChange({ autoRefresh: checked })}
+                        label='Auto-refresh when the PR changes'
+                      />
+                    </OverflowMenuSettingsRow>
                   ) : null}
                 </OverflowMenuSection>
                 <Separator className='my-1' />

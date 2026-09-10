@@ -41,8 +41,16 @@ import { useReviewQueue } from '@/hooks/useReviewQueue';
 import { pickTreeThemeCustomProperties, useTreeThemeStyles } from '@/hooks/useTreeThemeStyles';
 import { useViewedFiles } from '@/hooks/useViewedFiles';
 import { getCodeViewItemIdForFile } from '@/lib/code-view/build-items';
-import { hasAnyDraftAnnotation } from '@/lib/code-view/review-mutations';
-import { deferCodeViewControlledSync } from '@/lib/code-view/scroll-anchor';
+import {
+  addThreadAnnotationForComment,
+  hasAnyDraftAnnotation,
+  removeCommentFromAnnotation,
+  updateCommentInAnnotation,
+} from '@/lib/code-view/review-mutations';
+import {
+  deferCodeViewControlledSync,
+  runCodeViewMutationPreservingScroll,
+} from '@/lib/code-view/scroll-anchor';
 import {
   DEFAULT_CODE_VIEW_DISPLAY_PREFS,
   readCodeViewDisplayPrefs,
@@ -62,11 +70,13 @@ import {
   getRateLimitState,
   subscribeToRateLimitChanges,
   type PullRequestDiffData,
+  type PullRequestHeadMeta,
 } from '@/lib/github/api';
 import { formatViewedFilesError } from '@/lib/github/token-hints';
 import { OVERLAY_LAYOUT_KICK_EVENT } from '@/lib/overlay/messages';
 import { getReviewDraftBody, updateReviewDraftBody } from '@/lib/overlay/review-session';
 import { updatePullRequestReviewComments } from '@/lib/query/pr-diff';
+import { applyPullRequestHeadMeta, fetchPullRequestActivityComments } from '@/lib/query/refresh';
 import {
   buildReviewCommentCountByPath,
   getItemPath,
@@ -487,14 +497,84 @@ export function DiffOverlay({
     queue.length,
   ]);
 
+  // Activity-only refresh: new/edited/deleted review comments without new commits.
+  // Patches the live CodeView in place (no remount, scroll preserved) and costs
+  // one conditional request.
+  const [isSyncingActivity, setIsSyncingActivity] = useState(false);
+  const reviewCommentsRef = useRef(data.reviewComments);
+  useEffect(() => {
+    reviewCommentsRef.current = data.reviewComments;
+  }, [data.reviewComments]);
+
+  const handleActivityRefresh = useCallback(
+    (head: PullRequestHeadMeta) => {
+      setIsSyncingActivity(true);
+      void fetchPullRequestActivityComments(data.ref)
+        .then((fresh) => {
+          const previous = reviewCommentsRef.current;
+          const previousById = new Map(previous.map((comment) => [comment.id, comment]));
+          const freshIds = new Set(fresh.map((comment) => comment.id));
+          const added = fresh.filter((comment) => !previousById.has(comment.id));
+          const changed = fresh.filter((comment) => {
+            const before = previousById.get(comment.id);
+            return before != null && before.updated_at !== comment.updated_at;
+          });
+          const removed = previous.filter((comment) => !freshIds.has(comment.id));
+
+          const viewer = viewerRef.current;
+          if (viewer && codeViewItems && (added.length || changed.length || removed.length)) {
+            const itemFor = (path: string) => {
+              const file = codeViewItems.fileByPath.get(path);
+              return file
+                ? viewer.getItem(getCodeViewItemIdForFile(file, codeViewItems.diffPathSet))
+                : undefined;
+            };
+
+            runCodeViewMutationPreservingScroll(viewer, () => {
+              for (const comment of removed) {
+                const item = itemFor(comment.path);
+                if (item) {
+                  viewer.updateItem(removeCommentFromAnnotation(item, comment.id));
+                }
+              }
+              for (const comment of changed) {
+                const item = itemFor(comment.path);
+                if (item) {
+                  viewer.updateItem(updateCommentInAnnotation(item, comment));
+                }
+              }
+              for (const comment of added) {
+                const item = itemFor(comment.path);
+                if (item) {
+                  viewer.updateItem(addThreadAnnotationForComment(item, comment));
+                }
+              }
+            });
+          }
+
+          updateReviewComments(fresh);
+          applyPullRequestHeadMeta(data.ref, head);
+        })
+        .catch(() => {
+          // Best-effort; the next probe will try again.
+        })
+        .finally(() => {
+          setIsSyncingActivity(false);
+        });
+    },
+    [codeViewItems, data.ref, updateReviewComments],
+  );
+
   useAutoRefreshPullRequest({
     ref: data.ref,
+    enabled: displayPrefs.autoRefresh,
     headSha: data.pullRequest.head.sha,
     updatedAt: data.pullRequest.updated_at,
-    isRefreshing,
+    isRefreshing: isRefreshing || isSyncingActivity,
     rateLimit,
     canRefresh: canAutoRefresh,
     onRefresh: startRefresh,
+    onActivity: handleActivityRefresh,
   });
 
   const reviewQueueContextValue = useMemo<ReviewQueueContextValue>(
@@ -1165,7 +1245,7 @@ export function DiffOverlay({
               onDiffLayoutChange={updateDiffLayout}
               onDisplayPrefsChange={updateDisplayPrefs}
               onRefresh={handleRefresh}
-              isRefreshing={isRefreshing}
+              isRefreshing={isRefreshing || isSyncingActivity}
               onClose={handleCloseOverlay}
               allCollapsed={allCollapsed}
               onExpandAll={handleExpandAll}
